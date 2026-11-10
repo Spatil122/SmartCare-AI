@@ -212,29 +212,58 @@ if page == "Patient Portal":
         ]
 
     name = st.text_input(name_label)
-    phone = st.text_input(phone_label)
 
+    phone = st.text_input(phone_label,max_chars=10,
+                          key="patient_phone")
+
+    # Fetch registered hospitals
     cur.execute("SELECT name FROM hospitals ORDER BY name")
 
     hospital_options = [
         row[0] for row in cur.fetchall()
     ]
 
-    hospital = st.selectbox(
+    # Add Other option at the bottom
+    if "Other" not in hospital_options:
+        hospital_options.append("Other")
+
+    hospital_choice = st.selectbox(
         hospital_label,
-        hospital_options
+        hospital_options,
+        key="patient_hospital"
     )
 
+    # Ask for hospital name only if Other is selected
+    if hospital_choice == "Other":
+
+        hospital = st.text_input(
+            "Enter your hospital name",
+            key="other_hospital"
+        )
+
+    else:
+
+        hospital = hospital_choice
+
+    # These fields always remain visible
     category = st.selectbox(
         category_label,
         categories
     )
 
-    complaint = st.text_area(complaint_label)
+    complaint = st.text_area(
+        complaint_label
+    )
 
     if st.button(button_label):
 
-        if name.strip() and phone.strip() and hospital.strip() and complaint.strip():
+        if (
+    name.strip()
+    and phone.isdigit()
+    and len(phone) == 10
+    and hospital.strip()
+    and complaint.strip()
+):
 
             complaint_id = "SC-" + uuid.uuid4().hex[:8].upper()
 
@@ -245,7 +274,7 @@ if page == "Patient Portal":
                 complaint_id,
                 name,
                 phone,
-                hospital,
+                hospital.strip(),
                 category,
                 complaint,
                 "Pending",
@@ -258,7 +287,8 @@ if page == "Patient Portal":
             st.info("Your Complaint ID: " + complaint_id)
 
         else:
-            st.warning("Please fill all required fields.")
+
+           st.warning("Please fill all fields and enter a valid 10-digit mobile number.")
 
 # ---------------- ADMIN LOGIN ----------------
 
