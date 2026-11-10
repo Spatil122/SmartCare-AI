@@ -215,6 +215,8 @@ if page == "Patient Portal":
 
     phone = st.text_input(phone_label,max_chars=10,
                           key="patient_phone")
+    if phone and not phone.isdigit():
+        st.warning("please enter a valid 10-digit mobile numbers only.")
 
     # Fetch registered hospitals
     cur.execute("SELECT name FROM hospitals ORDER BY name")
