@@ -501,67 +501,85 @@ page = st.sidebar.radio("Navigation", menu)
 # =========================================================
 
 def show_dashboard(hospital=None):
-    connection = get_db()
+    
+    import pandas as pd
 
-    if hospital:
-        records = connection.execute(
-            "SELECT * FROM complaints WHERE hospital=? ORDER BY date DESC",
-            (hospital,)
-        ).fetchall()
-    else:
-        records = connection.execute(
-            "SELECT * FROM complaints ORDER BY date DESC"
-        ).fetchall()
-
-    connection.close()
-
-    total = len(records)
-    pending = sum(r["status"] == "Pending" for r in records)
-    progress = sum(r["status"] == "In Progress" for r in records)
-    resolved = sum(r["status"] == "Resolved" for r in records)
-
-    a, b, c, d = st.columns(4)
-    a.metric("Total Complaints", total)
-    b.metric("Pending", pending)
-    c.metric("In Progress", progress)
-    d.metric("Resolved", resolved)
-
-    st.subheader("Complaint Records")
+    st.divider()
+    st.subheader("📊 Graphical Complaint Analysis")
 
     if not records:
-        st.info("No complaints registered yet.")
+        st.info("No complaint data available.")
         return
 
+    # 1. Circular chart: Complaint categories.
+    category_counts = {}
     for record in records:
-        with st.expander(
-            f"{record['id']} | {record['hospital']} | {record['status']}"
-        ):
-            st.write("Patient:", record["name"])
-            st.write("Phone:", record["phone"])
-            st.write("Hospital:", record["hospital"])
-            st.write("Category:", record["category"])
-            st.write("Complaint:", record["complaint"])
-            st.write("Date:", record["date"])
+        category = record["category"] or "Other"
+        category_counts[category] = category_counts.get(category, 0) + 1
 
-            st.markdown("**AI Review Suggestion**")
-            st.write("Suggested category:", record["ai_category"] or "Not available")
-            st.write("Summary:", record["ai_summary"] or "Not available")
-            st.write("Priority:", record["ai_priority"] or "Not available")
-            st.write("Urgent:", record["ai_urgent"] or "Not available")
-            st.write("Reason:", record["ai_reason"] or "Not available")
+    st.markdown("### 🏥 Complaints by Category")
 
-            st.warning(
-                "AI output is only a suggestion. Staff must review it."
-            )
+    category_df = pd.DataFrame({
+        "Category": list(category_counts.keys()),
+        "Complaints": list(category_counts.values())
+    })
+
+    st.plotly_chart(
+        __import__("plotly.express").express.pie(
+            category_df,
+            names="Category",
+            values="Complaints",
+            hole=0.45,
+            title="Medical Complaint Distribution"
+        ),
+        use_container_width=True
+    )
+
+    # 2. Circular chart: Complaint status.
+    st.markdown("### 📋 Complaint Status")
+
+    status_df = pd.DataFrame({
+        "Status": ["Pending", "In Progress", "Resolved"],
+        "Count": [pending, progress, resolved]
+    })
+
+    st.plotly_chart(
+        __import__("plotly.express").express.pie(
+            status_df,
+            names="Status",
+            values="Count",
+            hole=0.45,
+            title="Complaint Status Distribution"
+        ),
+        use_container_width=True
+    )
+
+    # 3. Circular chart: Hospital-wise complaints.
+    if not hospital:
+        st.markdown("### 🏥 Hospital-wise Complaints")
+
+        hospital_counts = {}
+        for record in records:
+            name = record["hospital"] or "Other"
+            hospital_counts[name] = hospital_counts.get(name, 0) + 1
+
+        hospital_df = pd.DataFrame({
+            "Hospital": list(hospital_counts.keys()),
+            "Count": list(hospital_counts.values())
+        })
+
+        st.plotly_chart(
+            __import__("plotly.express").express.pie(
+                hospital_df,
+                names="Hospital",
+                values="Count",
+                hole=0.45,
+                title="Hospital Complaint Distribution"
+            ),
+            use_container_width=True
+        )
 
 
-if page in ["District Dashboard", "Hospital Dashboard"]:
-    st.header("📊 Dashboard")
-
-    if st.session_state.role == "Hospital Admin":
-        show_dashboard(st.session_state.hospital)
-    else:
-        show_dashboard()
 
 
 # =========================================================
