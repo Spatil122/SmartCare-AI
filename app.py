@@ -488,8 +488,8 @@ elif role in ["hospital admin", "hospital_admin", "hospital"]:
         "Doctor Availability"
     ]
 else:
-    st.error("Unrecognised account role")
-    st.write("Your database role is:", repr(st.session_state.role))
+    st.error("Your account role is not recognised.")
+    st.write("ROLE FOUND IN DATABASE:", repr(st.session_state.role))
     st.stop()
 
 
