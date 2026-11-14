@@ -627,60 +627,143 @@ elif page == "Manage Hospitals":
 # MANAGE STAFF USERS
 # =========================================================
 
+
+# =========================================================
+# MANAGE ADMINISTRATORS AND STAFF ACCOUNTS
+# =========================================================
+
 elif page == "Manage Users":
-    st.header("👤 Manage Staff Accounts")
+    st.header("👥 User and Administrator Management")
+
+    if st.session_state.role != "District Admin":
+        st.error("Only District Admin can manage accounts.")
+        st.stop()
 
     hospitals = get_hospitals()
 
-    if not hospitals:
-        st.warning("Add a hospital before creating a Hospital Admin.")
-    else:
-        with st.form("create_staff_form"):
-            new_username = st.text_input("New Username")
-            new_password = st.text_input(
-                "Temporary Password",
-                type="password"
-            )
-            new_hospital = st.selectbox("Hospital", hospitals)
+    # Create administrator or hospital staff account.
+    st.subheader("Create New Account")
 
-            create_user = st.form_submit_button("Create Hospital Admin")
+    with st.form("create_user_form"):
+        new_username = st.text_input("Username")
+        new_password = st.text_input("Password", type="password")
 
-            if create_user:
-                if not new_username.strip() or not new_password:
-                    st.error("Enter username and password.")
-                else:
-                    try:
+        new_role = st.selectbox(
+            "Account Role",
+            ["Hospital Admin", "District Admin"]
+        )
+
+        if new_role == "Hospital Admin":
+            if hospitals:
+                new_hospital = st.selectbox(
+                    "Assign Hospital",
+                    hospitals
+                )
+            else:
+                new_hospital = None
+        else:
+            new_hospital = None
+
+        create_account = st.form_submit_button("Create Account")
+
+        if create_account:
+            if not new_username.strip() or not new_password:
+                st.error("Enter username and password.")
+            elif len(new_password) < 8:
+                st.error("Password must contain at least 8 characters.")
+            elif new_role == "Hospital Admin" and not new_hospital:
+                st.error("Register a hospital first.")
+            else:
+                try:
+                    connection = get_db()
+                    connection.execute("""
+                        INSERT INTO users
+                        (username, password, role, hospital)
+                        VALUES (?, ?, ?, ?)
+                    """, (
+                        new_username.strip(),
+                        hash_password(new_password),
+                        new_role,
+                        new_hospital
+                    ))
+                    connection.commit()
+                    connection.close()
+
+                    st.success("Account created successfully.")
+                    st.rerun()
+
+                except sqlite3.IntegrityError:
+                    st.error("This username already exists.")
+
+    st.divider()
+
+    # Display all existing accounts.
+    st.subheader("Registered Accounts")
+
+    connection = get_db()
+    users = connection.execute("""
+        SELECT id, username, role, hospital
+        FROM users
+        ORDER BY username
+    """).fetchall()
+    connection.close()
+
+    if not users:
+        st.info("No accounts found.")
+
+    for user in users:
+        with st.expander(
+            f"{user['username']} | {user['role']}"
+        ):
+            st.write("Username:", user["username"])
+            st.write("Role:", user["role"])
+            st.write("Hospital:", user["hospital"] or "All hospitals")
+
+            # Reset an existing user's password.
+            with st.form(f"reset_password_{user['id']}"):
+                replacement_password = st.text_input(
+                    "New Password",
+                    type="password"
+                )
+
+                reset = st.form_submit_button("Reset Password")
+
+                if reset:
+                    if len(replacement_password) < 8:
+                        st.error("Password must contain at least 8 characters.")
+                    else:
                         connection = get_db()
                         connection.execute("""
-                            INSERT INTO users (username, password, role, hospital)
-                            VALUES (?, ?, ?, ?)
+                            UPDATE users
+                            SET password=?
+                            WHERE id=?
                         """, (
-                            new_username.strip(),
-                            hash_password(new_password),
-                            "Hospital Admin",
-                            new_hospital
+                            hash_password(replacement_password),
+                            user["id"]
                         ))
                         connection.commit()
                         connection.close()
-                        st.success("Hospital Admin account created.")
-                    except sqlite3.IntegrityError:
-                        st.error("Username already exists.")
 
-    connection = get_db()
-    users = connection.execute(
-        "SELECT id, username, role, hospital FROM users ORDER BY username"
-    ).fetchall()
-    connection.close()
+                        st.success("Password updated successfully.")
 
-    st.subheader("Existing Accounts")
+            # Do not allow deleting the currently logged-in account.
+            if user["username"] != st.session_state.username:
+                if st.button(
+                    "Remove Account",
+                    key=f"remove_user_{user['id']}"
+                ):
+                    connection = get_db()
+                    connection.execute(
+                        "DELETE FROM users WHERE id=?",
+                        (user["id"],)
+                    )
+                    connection.commit()
+                    connection.close()
 
-    for user in users:
-        st.write(
-            f"{user['username']} | {user['role']} | "
-            f"{user['hospital'] or 'All hospitals'}"
-        )
-
-
+                    st.success("Account removed.")
+                    st.rerun()
+            else:
+                st.info("You cannot remove your currently logged-in account.")
 # =========================================================
 # ADD AND MANAGE DOCTORS AND SERVICES
 # =========================================================
