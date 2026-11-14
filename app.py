@@ -463,7 +463,12 @@ if st.sidebar.button("Logout"):
     st.session_state.hospital = ""
     st.rerun()
 
-if st.session_state.role == "District Admin":
+# Convert old account role names into supported role names.
+role = str(st.session_state.role).strip().lower()
+
+if role in ["district admin", "district_admin", "admin", "main admin"]:
+    st.session_state.role = "District Admin"
+
     menu = [
         "District Dashboard",
         "Manage Hospitals",
@@ -473,7 +478,9 @@ if st.session_state.role == "District Admin":
         "Doctor Availability"
     ]
 
-elif st.session_state.role == "Hospital Admin":
+elif role in ["hospital admin", "hospital_admin", "hospital"]:
+    st.session_state.role = "Hospital Admin"
+
     menu = [
         "Hospital Dashboard",
         "Manage Doctors and Services",
@@ -482,7 +489,7 @@ elif st.session_state.role == "Hospital Admin":
     ]
 
 else:
-    st.error("Your account role is not authorised.")
+    st.error(f"Unrecognised account role: {st.session_state.role}")
     st.stop()
 
 page = st.sidebar.radio("Navigation", menu)
