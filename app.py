@@ -487,10 +487,11 @@ elif role in ["hospital admin", "hospital_admin", "hospital"]:
         "Hospital Complaints",
         "Doctor Availability"
     ]
-
 else:
-    st.error(f"Unrecognised account role: {st.session_state.role}")
+    st.error("Unrecognised account role")
+    st.write("Your database role is:", repr(st.session_state.role))
     st.stop()
+
 
 page = st.sidebar.radio("Navigation", menu)
 
