@@ -121,6 +121,7 @@ def show_dashboard(hospital=None):
 # =========================================================
 
 if page == "District Dashboard":
+    page = st.sidebar.radio("Navigation", menu)
     show_dashboard()
 
 elif page == "Hospital Dashboard":
