@@ -587,12 +587,13 @@ def show_dashboard(hospital=None):
 # =========================================================
 
 elif page == "Manage Hospitals":
+    # Display the hospital management page.
     st.header("🏥 Manage Hospitals")
 
+    # Form to register a new hospital.
     with st.form("add_hospital_form"):
         hospital_name = st.text_input("Hospital Name")
         district_name = st.text_input("District")
-
         add_hospital = st.form_submit_button("Add Hospital")
 
         if add_hospital:
@@ -612,6 +613,7 @@ elif page == "Manage Hospitals":
                 except sqlite3.IntegrityError:
                     st.error("This hospital already exists.")
 
+    # Get all registered hospitals.
     connection = get_db()
     hospitals = connection.execute(
         "SELECT * FROM hospitals ORDER BY name"
@@ -620,6 +622,7 @@ elif page == "Manage Hospitals":
 
     st.subheader("Registered Hospitals")
 
+    # Display hospitals and allow deactivation.
     for hospital in hospitals:
         st.write(
             f"{hospital['name']} | District: {hospital['district']} | "
@@ -639,7 +642,6 @@ elif page == "Manage Hospitals":
                 connection.commit()
                 connection.close()
                 st.rerun()
-
 
 # =========================================================
 # MANAGE STAFF USERS
