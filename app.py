@@ -176,13 +176,50 @@ initialise()
 # DATABASE HELPER FUNCTIONS
 # =========================================================
 
+
 def get_hospitals():
+    """Safely retrieve active hospitals from the database."""
     connection = get_db()
-    rows = connection.execute(
-        "SELECT name FROM hospitals WHERE active=1 ORDER BY name"
-    ).fetchall()
-    connection.close()
-    return [row["name"] for row in rows]
+
+    try:
+        cursor = connection.cursor()
+
+        # Check whether the hospitals table exists.
+        table = cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='hospitals'
+        """).fetchone()
+
+        if table is None:
+            return []
+
+        # Check which columns are available.
+        columns = [
+            row["name"]
+            for row in cursor.execute(
+                "PRAGMA table_info(hospitals)"
+            ).fetchall()
+        ]
+
+        if "name" not in columns:
+            return []
+
+        # Older databases may not have an active column.
+        if "active" in columns:
+            rows = cursor.execute("""
+                SELECT name FROM hospitals
+                WHERE active=1 ORDER BY name
+            """).fetchall()
+        else:
+            rows = cursor.execute("""
+                SELECT name FROM hospitals ORDER BY name
+            """).fetchall()
+
+        return [row["name"] for row in rows if row["name"]]
+
+    finally:
+        connection.close()
+
 
 
 def get_doctors(hospital=None, category=None):
