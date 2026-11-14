@@ -1,109 +1,90 @@
-"""
-SMARTCARE AI - Complete Streamlit application
-Includes patient complaints, Ollama AI assistance, hospital dashboards,
-hospital registration, and doctor / medical-service availability.
-
-Beginner note:
-- This app uses the existing smartcare.db database.
-- New tables and columns are added safely; existing complaint records are kept.
-- Ollama is optional. If it is unavailable, complaint registration still works.
-"""
-
-import os
-import json
-from pathlib import Path
-import uuid
-import random
-import hashlib
-import hmac
-import sqlite3
-import urllib.request
-import urllib.error
-from datetime import datetime, date, timedelta
+# ============================================================
+# SMARTCARE AI - Hospital Complaint Management System
+# Beginner-friendly, single-file Streamlit application.
+#
+# IMPORTANT:
+# 1. Keep your existing smartcare.db file. This code upgrades
+#    its tables safely and does not intentionally delete records.
+# 2. Main Admin login (created only if missing):
+#       username: mainadmin
+#       password: MainAdmin@123
+# 3. Existing "District Commissioner" accounts are upgraded
+#    to the new role name "Main Admin".
+# 4. Optional AI uses Ollama. If Ollama is unavailable, the
+#    complaint is still saved and staff can choose the category.
+# ============================================================
 
 import streamlit as st
-import plotly.express as px
 
-
-# ---------------------------------------------------------
-# PAGE SETTINGS
-# ---------------------------------------------------------
-
+# Page settings must be the first Streamlit command.
 st.set_page_config(
     page_title="SMARTCARE AI",
     page_icon="🏥",
     layout="wide"
 )
 
-DB_PATH = str(Path(__file__).resolve().parent / "smartcare.db")
+import sqlite3
+import uuid
+import hashlib
+import random
+import requests
+from datetime import datetime
+import plotly.express as px
 
-DEFAULT_MEDICAL_CATEGORIES = [
-    "Dental",
-    "Bone / Orthopaedics",
-    "X-ray / Radiology",
-    "General Medicine",
-    "Cardiology",
-    "Eye Care",
-    "ENT",
-    "Gynaecology",
-    "Paediatrics",
+DB_FILE = "smartcare.db"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3.2"
+
+CATEGORIES = [
+    "Doctor Unavailable",
+    "Medicine Unavailable",
+    "Cleanliness Problem",
+    "Water Problem",
+    "Bed Unavailable",
+    "Hospital Facilities Problem",
+    "Staff Behaviour Problem",
+    "Delay in Treatment",
+    "Billing Problem",
+    "Other"
 ]
 
-COMPLAINT_CATEGORIES = {
-    "English": [
-        "Doctor Unavailable",
-        "Medicine Unavailable",
-        "Cleanliness Problem",
-        "Water Problem",
-        "Bed Unavailable",
-        "Hospital Facilities Problem",
-        "Staff Behaviour Problem",
-        "Other",
-    ],
-    "Kannada": [
-        "ವೈದ್ಯರು ಲಭ್ಯವಿಲ್ಲ",
-        "ಔಷಧಿ ಲಭ್ಯವಿಲ್ಲ",
-        "ಸ್ವಚ್ಛತೆ ಸಮಸ್ಯೆ",
-        "ನೀರಿನ ಸಮಸ್ಯೆ",
-        "ಹಾಸಿಗೆ ಲಭ್ಯವಿಲ್ಲ",
-        "ಆಸ್ಪತ್ರೆ ಸೌಲಭ್ಯ ಸಮಸ್ಯೆ",
-        "ಸಿಬ್ಬಂದಿ ವರ್ತನೆ ಸಮಸ್ಯೆ",
-        "ಇತರೆ",
-    ],
-    "Hindi": [
-        "डॉक्टर उपलब्ध नहीं",
-        "दवाइयां उपलब्ध नहीं",
-        "सफाई की समस्या",
-        "पानी की समस्या",
-        "बेड उपलब्ध नहीं",
-        "अस्पताल की सुविधाओं की समस्या",
-        "कर्मचारियों के व्यवहार की समस्या",
-        "अन्य",
-    ],
-}
+STATUSES = ["Pending", "In Progress", "Resolved"]
 
 
-# ---------------------------------------------------------
-# DATABASE CONNECTION AND SAFE MIGRATIONS
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# DATABASE CONNECTION AND SAFE TABLE SETUP
+# ------------------------------------------------------------
 
 def get_connection():
-    """Open the SQLite database and ensure required tables exist."""
-    connection = sqlite3.connect(DB_PATH, check_same_thread=False)
+    """Open the SQLite database and allow use across Streamlit reruns."""
+    connection = sqlite3.connect(DB_FILE, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     return connection
 
 
+def hash_password(password):
+    """Hash a password before saving it in the database."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
 def column_exists(connection, table_name, column_name):
-    """Check whether a database column already exists."""
+    """Check whether a database table already has a column."""
     columns = connection.execute(
         f"PRAGMA table_info({table_name})"
     ).fetchall()
     return any(column["name"] == column_name for column in columns)
 
 
-def initialize_database():
-    """Create tables and add missing columns without deleting old records."""
+def add_column_if_missing(connection, table_name, column_name, column_type):
+    """Add a new column only when it is not already present."""
+    if not column_exists(connection, table_name, column_name):
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+        )
+
+
+def setup_database():
+    """Create required tables and upgrade older SMARTCARE databases."""
     connection = get_connection()
     cursor = connection.cursor()
 
@@ -138,144 +119,67 @@ def initialize_database():
         )
     """)
 
-    # AI results are stored separately from the patient's selected category.
-    ai_columns = {
-        "ai_category": "TEXT",
-        "ai_summary": "TEXT",
-        "ai_priority": "TEXT",
-        "ai_urgent": "INTEGER DEFAULT 0",
-        "ai_reason": "TEXT",
-        "ai_review_required": "INTEGER DEFAULT 1",
-    }
-    for column_name, column_type in ai_columns.items():
-        if not column_exists(connection, "complaints", column_name):
-            cursor.execute(
-                f"ALTER TABLE complaints ADD COLUMN {column_name} {column_type}"
-            )
+    # Extra fields are added safely to existing complaint tables.
+    add_column_if_missing(connection, "complaints", "ai_category", "TEXT")
+    add_column_if_missing(connection, "complaints", "ai_summary", "TEXT")
 
+    # Every complaint interaction is stored as a separate history entry.
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS medical_categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            active INTEGER NOT NULL DEFAULT 1
+        CREATE TABLE IF NOT EXISTS complaint_interactions (
+            interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            complaint_id TEXT NOT NULL,
+            author TEXT NOT NULL,
+            author_role TEXT,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL
         )
     """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS doctor_services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            hospital TEXT NOT NULL,
-            category TEXT NOT NULL,
-            record_type TEXT NOT NULL DEFAULT 'Doctor',
-            service_name TEXT DEFAULT '',
-            availability TEXT NOT NULL DEFAULT 'Available',
-            consultation_days TEXT DEFAULT '',
-            start_time TEXT DEFAULT '',
-            end_time TEXT DEFAULT '',
-            next_available TEXT DEFAULT '',
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    # Add one starter hospital only when the hospital table is empty.
+    hospital_count = cursor.execute(
+        "SELECT COUNT(*) FROM hospitals"
+    ).fetchone()[0]
+
+    if hospital_count == 0:
+        cursor.execute(
+            "INSERT OR IGNORE INTO hospitals (name, district, location) VALUES (?, ?, ?)",
+            ("City General Hospital", "Kalaburagi", "Main City")
         )
+
+    # Rename the old role without changing usernames or passwords.
+    cursor.execute("""
+        UPDATE users
+        SET role = 'Main Admin'
+        WHERE role = 'District Commissioner'
     """)
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO hospitals(name, district, location) VALUES (?, ?, ?)",
-        ("City General Hospital", "Kalaburagi", "Main City")
-    )
+    # Create a Main Admin account only if one does not already exist.
+    main_admin_exists = cursor.execute(
+        "SELECT username FROM users WHERE role='Main Admin' LIMIT 1"
+    ).fetchone()
 
-    for category in DEFAULT_MEDICAL_CATEGORIES:
-        cursor.execute(
-            "INSERT OR IGNORE INTO medical_categories(name, active) VALUES (?, 1)",
-            (category,)
-        )
-
-    # Keep the original demo accounts for continuity with the old application.
-    # Change these demo passwords before making the app public.
-    demo_accounts = [
-        ("district", "District Commissioner", "ALL",
-         "district@example.com", "District@123"),
-        ("hospital", "Hospital Admin", "City General Hospital",
-         "hospital@example.com", "Hospital@123"),
-    ]
-    for username, role, hospital, email, password in demo_accounts:
-        cursor.execute(
-            "INSERT OR IGNORE INTO users(username, role, hospital, email, password) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (username, role, hospital, email, hash_password(password))
-        )
+    if not main_admin_exists:
+        cursor.execute("""
+            INSERT OR IGNORE INTO users
+            (username, role, hospital, email, password)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            "mainadmin",
+            "Main Admin",
+            "ALL",
+            "mainadmin@example.com",
+            hash_password("MainAdmin@123")
+        ))
 
     connection.commit()
     connection.close()
 
 
-def hash_password(password):
-    """Create a salted PBKDF2 password hash using Python's standard library."""
-    iterations = 310000
-    salt = os.urandom(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, iterations
-    ).hex()
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest}"
+setup_database()
 
 
-def verify_password(password, stored_value):
-    """Verify new PBKDF2 hashes and older SHA-256 / plain-text records."""
-    if not stored_value:
-        return False
-
-    if stored_value.startswith("pbkdf2_sha256$"):
-        try:
-            _, iterations, salt_hex, expected = stored_value.split("$", 3)
-            actual = hashlib.pbkdf2_hmac(
-                "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations)
-            ).hex()
-            return hmac.compare_digest(actual, expected)
-        except (ValueError, TypeError):
-            return False
-
-    # Older versions used an unsalted SHA-256 hash or plain-text password.
-    legacy_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-    return hmac.compare_digest(stored_value, legacy_hash) or stored_value == password
-
-
-def normalize_role(role):
-    """Map older administrator role labels to the current role names."""
-    cleaned = (role or "").strip().lower()
-    if cleaned in {
-        "district commissioner", "district admin", "district administrator",
-        "main admin", "main administrator", "super admin"
-    }:
-        return "District Commissioner"
-    if cleaned in {"hospital admin", "hospital administrator", "hospital manager"}:
-        return "Hospital Admin"
-    return role
-
-
-initialize_database()
-
-
-# ---------------------------------------------------------
-# SESSION STATE
-# ---------------------------------------------------------
-
-for key, default in {
-    "logged_in": False,
-    "user_role": None,
-    "username": None,
-    "otp": None,
-    "reset_user": None,
-    "otp_expiry": None,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
-
-
-# ---------------------------------------------------------
-# DATABASE HELPERS
-# ---------------------------------------------------------
-
-def get_hospitals():
-    """Return registered hospital names for dropdowns."""
+def fetch_hospitals():
+    """Return registered hospital names."""
     connection = get_connection()
     rows = connection.execute(
         "SELECT name FROM hospitals ORDER BY name"
@@ -284,369 +188,348 @@ def get_hospitals():
     return [row["name"] for row in rows]
 
 
-def get_medical_categories(active_only=True):
-    """Return medical category names for dropdowns."""
+def add_interaction(complaint_id, author, role, message):
+    """Save a staff reply or complaint update in the interaction history."""
     connection = get_connection()
-    if active_only:
-        rows = connection.execute(
-            "SELECT name FROM medical_categories WHERE active=1 ORDER BY name"
-        ).fetchall()
-    else:
-        rows = connection.execute(
-            "SELECT name FROM medical_categories ORDER BY name"
-        ).fetchall()
+    connection.execute("""
+        INSERT INTO complaint_interactions
+        (complaint_id, author, author_role, message, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        complaint_id,
+        author,
+        role,
+        message.strip(),
+        datetime.now().strftime("%d-%m-%Y %H:%M")
+    ))
+    connection.commit()
     connection.close()
-    return [row["name"] for row in rows]
 
 
-# ---------------------------------------------------------
-# OPTIONAL LOCAL OLLAMA AI
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# OPTIONAL OLLAMA AI CLASSIFICATION
+# ------------------------------------------------------------
 
-def analyse_complaint_with_ollama(complaint_text):
+def classify_with_ollama(complaint_text):
     """
-    Ask a locally running Ollama model to organise the complaint.
-    Patient name and phone number are never sent to Ollama.
-    AI suggestions must be checked by a human hospital staff member.
+    Ask Ollama to suggest one complaint category.
+    If Ollama is not running or cannot be reached, return None.
+    The complaint is still registered even when AI is unavailable.
     """
-    ollama_url = os.getenv(
-        "SMARTCARE_OLLAMA_URL",
-        "http://localhost:11434/api/generate"
-    )
-    ollama_model = os.getenv("SMARTCARE_OLLAMA_MODEL", "qwen2.5:0.5b")
-
     prompt = f"""
-You help organise hospital service complaints. Do not diagnose patients,
-recommend treatment, or make clinical decisions. Classify only the service
-issue described below. Return valid JSON only with these keys:
-category, summary, priority, urgent, reason.
-category must be one of: Doctor Unavailable, Medicine Unavailable,
-Cleanliness Problem, Water Problem, Bed Unavailable,
-Hospital Facilities Problem, Staff Behaviour Problem, Other.
-priority must be Low, Medium, High, or Critical.
-urgent must be true or false.
-If the complaint suggests immediate danger or a medical emergency, set
-urgent to true and priority to Critical. Keep summary short.
-Complaint: {complaint_text}
+Choose exactly one category from this list:
+{", ".join(CATEGORIES)}
+
+Complaint:
+{complaint_text}
+
+Return only the category name. Do not provide medical advice.
 """
-    payload = {
-        "model": ollama_model,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-    }
-
-    request = urllib.request.Request(
-        ollama_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        ai_text = result.get("response", "{}")
-        parsed = json.loads(ai_text)
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=12
+        )
+        response.raise_for_status()
+        answer = response.json().get("response", "").strip()
 
-        allowed_priorities = {"Low", "Medium", "High", "Critical"}
-        priority = parsed.get("priority", "Medium")
-        if priority not in allowed_priorities:
-            priority = "Medium"
-
-        allowed_categories = set(COMPLAINT_CATEGORIES["English"])
-        category = parsed.get("category", "Other")
-        if category not in allowed_categories:
-            category = "Other"
-
-        return {
-            "category": category,
-            "summary": str(parsed.get("summary", ""))[:500],
-            "priority": priority,
-            "urgent": 1 if parsed.get("urgent") is True else 0,
-            "reason": str(parsed.get("reason", ""))[:500],
-        }
-    except Exception:
-        # App remains usable when Ollama is not installed or not running.
+        # Match the AI answer to one of the approved categories.
+        for category in CATEGORIES:
+            if category.lower() in answer.lower():
+                return category
+        return "Other"
+    except requests.RequestException:
+        return None
+    except (ValueError, KeyError):
         return None
 
 
-# ---------------------------------------------------------
-# HEADER AND SIDEBAR NAVIGATION
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# SESSION STATE
+# ------------------------------------------------------------
+
+defaults = {
+    "logged_in": False,
+    "username": None,
+    "user_role": None,
+    "user_hospital": None,
+    "otp": None,
+    "reset_user": None,
+    "last_complaint_id": None
+}
+
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# ------------------------------------------------------------
+# TOP OF APPLICATION
+# ------------------------------------------------------------
 
 st.title("🏥 SMARTCARE AI")
-st.caption("Hospital Service Monitoring, Patient Complaints & Doctor Availability")
+st.caption("Hospital Complaint Registration, Tracking and Service Monitoring")
 
-role = st.session_state.user_role
-username = st.session_state.username
-logged_in = st.session_state.logged_in
+with st.sidebar:
+    st.subheader("Navigation")
 
-if logged_in:
-    st.sidebar.success(f"Logged in: {username}")
-    if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.user_role = None
-        st.session_state.username = None
-        st.rerun()
+    if st.session_state.logged_in:
+        st.success(f"Logged in: {st.session_state.username}")
+        st.caption(f"Role: {st.session_state.user_role}")
 
-    if role == "District Commissioner":
-        page_options = [
-            "Patient Portal",
-            "Check Doctor Availability",
-            "District Dashboard",
-            "Hospital Registration",
-            "Manage Users",
-            "Doctor & Service Management",
-        ]
-    elif role == "Hospital Admin":
-        page_options = [
-            "Patient Portal",
-            "Check Doctor Availability",
-            "Hospital Dashboard",
-            "Manage Users",
-            "Doctor & Service Management",
-        ]
+        if st.button("Logout", use_container_width=True):
+            for key, value in defaults.items():
+                st.session_state[key] = value
+            st.rerun()
+
+        if st.session_state.user_role == "Main Admin":
+            menu = [
+                "Patient Portal",
+                "Track Complaint",
+                "Main Admin Dashboard",
+                "Hospital Management",
+                "User Management"
+            ]
+        elif st.session_state.user_role == "Hospital Admin":
+            menu = [
+                "Patient Portal",
+                "Track Complaint",
+                "Hospital Dashboard",
+                "Staff Management"
+            ]
+        else:
+            menu = [
+                "Patient Portal",
+                "Track Complaint",
+                "Staff Dashboard"
+            ]
     else:
-        st.error("Unrecognised account role. Contact the District Commissioner.")
-        st.stop()
-else:
-    page_options = [
-        "Patient Portal",
-        "Check Doctor Availability",
-        "Admin Login",
-    ]
+        menu = ["Patient Portal", "Track Complaint", "Admin Login"]
 
-page = st.sidebar.radio("Navigation", page_options)
+    page = st.radio("Open page", menu)
 
 
-# ---------------------------------------------------------
-# PATIENT PORTAL - REGISTER A COMPLAINT
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# PATIENT PORTAL
+# ------------------------------------------------------------
 
 if page == "Patient Portal":
-    st.header("📝 Register Hospital Complaint")
+    st.header("📝 Register a Hospital Complaint")
 
     language = st.selectbox(
-        "Select Language",
-        ["English", "Kannada", "Hindi"],
-        key="patient_language"
+        "Select Language / ಭಾಷೆ / भाषा",
+        ["English", "ಕನ್ನಡ (Kannada)", "हिन्दी (Hindi)"]
     )
 
-    labels = {
-        "English": {
-            "name": "Your Name",
-            "phone": "Mobile Number",
-            "hospital": "Hospital Name",
-            "category": "Complaint Category",
-            "complaint": "Describe Your Complaint",
-            "submit": "Submit Complaint",
-        },
-        "Kannada": {
+    if language == "ಕನ್ನಡ (Kannada)":
+        labels = {
             "name": "ನಿಮ್ಮ ಹೆಸರು",
-            "phone": "ಮೊಬೈಲ್ ಸಂಖ್ಯೆ",
-            "hospital": "ಆಸ್ಪತ್ರೆಯ ಹೆಸರು",
+            "phone": "10 ಅಂಕಿಯ ಮೊಬೈಲ್ ಸಂಖ್ಯೆ",
+            "hospital": "ಆಸ್ಪತ್ರೆ",
             "category": "ದೂರಿನ ಪ್ರಕಾರ",
             "complaint": "ನಿಮ್ಮ ದೂರನ್ನು ವಿವರಿಸಿ",
-            "submit": "ದೂರು ಸಲ್ಲಿಸಿ",
-        },
-        "Hindi": {
+            "submit": "ದೂರು ಸಲ್ಲಿಸಿ"
+        }
+        category_labels = [
+            "ವೈದ್ಯರು ಲಭ್ಯವಿಲ್ಲ", "ಔಷಧಿ ಲಭ್ಯವಿಲ್ಲ", "ಸ್ವಚ್ಛತೆ ಸಮಸ್ಯೆ",
+            "ನೀರಿನ ಸಮಸ್ಯೆ", "ಹಾಸಿಗೆ ಲಭ್ಯವಿಲ್ಲ", "ಆಸ್ಪತ್ರೆ ಸೌಲಭ್ಯ ಸಮಸ್ಯೆ",
+            "ಸಿಬ್ಬಂದಿ ವರ್ತನೆ ಸಮಸ್ಯೆ", "ಚಿಕಿತ್ಸೆಯಲ್ಲಿ ವಿಳಂಬ",
+            "ಬಿಲ್ಲಿಂಗ್ ಸಮಸ್ಯೆ", "ಇತರೆ"
+        ]
+    elif language == "हिन्दी (Hindi)":
+        labels = {
             "name": "आपका नाम",
-            "phone": "मोबाइल नंबर",
-            "hospital": "अस्पताल का नाम",
+            "phone": "10 अंकों का मोबाइल नंबर",
+            "hospital": "अस्पताल",
             "category": "शिकायत का प्रकार",
             "complaint": "अपनी शिकायत बताएं",
-            "submit": "शिकायत जमा करें",
-        },
-    }
-    label = labels[language]
-    complaint_categories = COMPLAINT_CATEGORIES[language]
-
-    patient_name = st.text_input(label["name"])
-    patient_phone = st.text_input(
-        label["phone"], max_chars=10, key="patient_phone"
-    )
-    if patient_phone and not patient_phone.isdigit():
-        st.warning("Enter digits only for the mobile number.")
-
-    hospital_options = get_hospitals()
-    if "Other" not in hospital_options:
-        hospital_options.append("Other")
-    hospital_choice = st.selectbox(label["hospital"], hospital_options)
-
-    if hospital_choice == "Other":
-        hospital_name = st.text_input("Enter your hospital name")
+            "submit": "शिकायत जमा करें"
+        }
+        category_labels = [
+            "डॉक्टर उपलब्ध नहीं", "दवाइयां उपलब्ध नहीं", "सफाई की समस्या",
+            "पानी की समस्या", "बेड उपलब्ध नहीं", "अस्पताल की सुविधाओं की समस्या",
+            "कर्मचारियों के व्यवहार की समस्या", "इलाज में देरी",
+            "बिलिंग की समस्या", "अन्य"
+        ]
     else:
-        hospital_name = hospital_choice
+        labels = {
+            "name": "Your Name",
+            "phone": "10-digit Mobile Number",
+            "hospital": "Hospital",
+            "category": "Complaint Category",
+            "complaint": "Describe Your Complaint",
+            "submit": "Submit Complaint"
+        }
+        category_labels = CATEGORIES
 
-    complaint_category = st.selectbox(label["category"], complaint_categories)
-    complaint_text = st.text_area(label["complaint"], height=130)
+    patient_name = st.text_input(labels["name"])
+    patient_phone = st.text_input(labels["phone"], max_chars=10)
 
-    if st.button(label["submit"], type="primary"):
-        if (
-            not patient_name.strip()
-            or not patient_phone.isdigit()
-            or len(patient_phone) != 10
-            or not hospital_name.strip()
-            or not complaint_text.strip()
-        ):
-            st.warning("Please complete all fields and enter a valid 10-digit phone number.")
+    hospital_options = fetch_hospitals()
+    hospital_choices = hospital_options + ["Other"] if "Other" not in hospital_options else hospital_options
+
+    selected_hospital = st.selectbox(labels["hospital"], hospital_choices)
+    if selected_hospital == "Other":
+        hospital_name = st.text_input("Enter hospital name")
+    else:
+        hospital_name = selected_hospital
+
+    selected_category_label = st.selectbox(labels["category"], category_labels)
+    if language == "English":
+        chosen_category = selected_category_label
+    else:
+        # Keep the stored category in English so reports stay consistent.
+        chosen_category = CATEGORIES[category_labels.index(selected_category_label)]
+
+    complaint_text = st.text_area(labels["complaint"], height=150)
+
+    st.caption("AI will suggest a category after you submit. Staff can review the suggestion.")
+
+    if st.button(labels["submit"], type="primary"):
+        if not patient_name.strip():
+            st.error("Please enter your name.")
+        elif not (patient_phone.isdigit() and len(patient_phone) == 10):
+            st.error("Please enter a valid 10-digit mobile number.")
+        elif not hospital_name.strip():
+            st.error("Please select or enter a hospital.")
+        elif not complaint_text.strip():
+            st.error("Please describe your complaint.")
         else:
-            # Analyse the complaint before saving. This does not send patient identity.
-            ai_result = analyse_complaint_with_ollama(complaint_text.strip())
+            with st.spinner("AI is checking the complaint category..."):
+                ai_category = classify_with_ollama(complaint_text)
+
             complaint_id = "SC-" + uuid.uuid4().hex[:8].upper()
-            created_at = datetime.now().strftime("%d-%m-%Y %H:%M")
+            final_category = ai_category if ai_category else chosen_category
+            ai_summary = (
+                "AI suggested: " + ai_category
+                if ai_category
+                else "AI unavailable. Patient-selected category used."
+            )
 
             connection = get_connection()
             connection.execute("""
-                INSERT INTO complaints (
-                    id, name, phone, hospital, category, complaint, status, date,
-                    ai_category, ai_summary, ai_priority, ai_urgent, ai_reason,
-                    ai_review_required
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO complaints
+                (id, name, phone, hospital, category, complaint, status, date, ai_category, ai_summary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 complaint_id,
                 patient_name.strip(),
                 patient_phone,
                 hospital_name.strip(),
-                complaint_category,
+                final_category,
                 complaint_text.strip(),
                 "Pending",
-                created_at,
-                ai_result["category"] if ai_result else None,
-                ai_result["summary"] if ai_result else None,
-                ai_result["priority"] if ai_result else None,
-                ai_result["urgent"] if ai_result else 0,
-                ai_result["reason"] if ai_result else None,
-                1,
+                datetime.now().strftime("%d-%m-%Y %H:%M"),
+                ai_category,
+                ai_summary
             ))
             connection.commit()
             connection.close()
 
-            st.success("Complaint registered successfully!")
-            st.info(f"Your Complaint ID: {complaint_id}")
-            if ai_result:
-                st.caption("AI has prepared an initial suggestion for hospital staff review.")
+            add_interaction(
+                complaint_id,
+                patient_name.strip(),
+                "Patient",
+                "Complaint submitted."
+            )
+
+            st.session_state.last_complaint_id = complaint_id
+            st.success("Complaint registered successfully.")
+            st.info(f"Your Complaint ID: **{complaint_id}**")
+            st.write("Saved category:", final_category)
+            if ai_category:
+                st.success(f"AI category suggestion: {ai_category}")
             else:
-                st.info(
-                    "Complaint saved. Local Ollama AI is not reachable right now; "
-                    "hospital staff can still review and organise this complaint."
-                )
+                st.warning("AI is not connected. Your complaint is saved using your selected category.")
+            st.caption("Keep your Complaint ID and mobile number safe to track updates.")
 
 
-# ---------------------------------------------------------
-# PATIENT PORTAL - CHECK DOCTOR / SERVICE AVAILABILITY
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# PATIENT COMPLAINT TRACKING AND INTERACTION HISTORY
+# ------------------------------------------------------------
 
-elif page == "Check Doctor Availability":
-    st.header("🔎 Check Doctor & Medical Service Availability")
+elif page == "Track Complaint":
+    st.header("🔎 Track Your Complaint")
+    st.write("Enter the Complaint ID and the same mobile number used during registration.")
 
-    hospitals = get_hospitals()
-    if not hospitals:
-        st.info("No hospitals are registered yet.")
-    else:
-        selected_hospital = st.selectbox("Select Hospital", hospitals)
-        categories = ["All Categories"] + get_medical_categories()
+    track_id = st.text_input("Complaint ID", value=st.session_state.last_complaint_id or "")
+    track_phone = st.text_input("Registered Mobile Number", max_chars=10, key="track_phone")
 
-        selected_category = st.selectbox(
-            "Select Medical Category",
-            categories,
-            key="patient_medical_category"
-        )
+    if st.button("Find Complaint"):
+        if not track_id.strip() or not (track_phone.isdigit() and len(track_phone) == 10):
+            st.error("Enter a valid Complaint ID and 10-digit mobile number.")
+        else:
+            connection = get_connection()
+            record = connection.execute("""
+                SELECT * FROM complaints WHERE id=? AND phone=?
+            """, (track_id.strip().upper(), track_phone)).fetchone()
+            interactions = connection.execute("""
+                SELECT author, author_role, message, created_at
+                FROM complaint_interactions
+                WHERE complaint_id=?
+                ORDER BY interaction_id
+            """, (track_id.strip().upper(),)).fetchall()
+            connection.close()
 
-        connection = get_connection()
-        query = """
-            SELECT name, category, record_type, service_name, availability,
-                   consultation_days, start_time, end_time, next_available
-            FROM doctor_services
-            WHERE hospital=?
-        """
-        parameters = [selected_hospital]
-        if selected_category != "All Categories":
-            query += " AND category=?"
-            parameters.append(selected_category)
-        query += " ORDER BY category, name"
+            if not record:
+                st.error("No complaint found. Please check the Complaint ID and mobile number.")
+            else:
+                st.success("Complaint found.")
+                a, b, c = st.columns(3)
+                a.metric("Status", record["status"])
+                b.metric("Category", record["category"])
+                c.metric("Hospital", record["hospital"])
+                st.write("Complaint:", record["complaint"])
+                st.write("Registered on:", record["date"])
 
-        records = connection.execute(query, parameters).fetchall()
-        connection.close()
-
-        if not records:
-            st.info("No doctors or services are listed for this hospital and category.")
-        for record in records:
-            with st.container(border=True):
-                st.subheader(record["name"])
-                st.write(f"Hospital: {selected_hospital}")
-                st.write(f"Category: {record['category']}")
-                st.write(f"Type: {record['record_type']}")
-                if record["service_name"]:
-                    st.write(f"Service: {record['service_name']}")
-
-                if record["availability"] == "Available":
-                    st.success("Available")
-                elif record["availability"] == "On Leave":
-                    st.warning("On Leave")
+                st.subheader("Conversation / Update History")
+                if interactions:
+                    for item in interactions:
+                        with st.container(border=True):
+                            st.write(f"**{item['author']} ({item['author_role'] or 'User'})**")
+                            st.write(item["message"])
+                            st.caption(item["created_at"])
                 else:
-                    st.error("Unavailable")
-
-                st.write(
-                    "Consultation days: "
-                    + (record["consultation_days"] or "Please contact hospital")
-                )
-                st.write(
-                    "Timings: "
-                    + (record["start_time"] or "--")
-                    + " to "
-                    + (record["end_time"] or "--")
-                )
-                st.write("Next available: " + (record["next_available"] or "Not updated"))
-
-        st.caption(
-            "Availability is maintained by hospital administrators. "
-            "Please confirm with the hospital before travelling."
-        )
+                    st.info("No updates have been added yet.")
 
 
-# ---------------------------------------------------------
-# ADMIN LOGIN AND DEMO PASSWORD RESET
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# ADMIN LOGIN AND PASSWORD RESET DEMO
+# ------------------------------------------------------------
 
 elif page == "Admin Login":
     st.header("🔐 Admin Login")
 
-    if not st.session_state.logged_in:
-        login_username = st.text_input("Username")
-        login_password = st.text_input("Password", type="password")
+    username = st.text_input("Username", key="login_username")
+    password = st.text_input("Password", type="password", key="login_password")
 
-        if st.button("Login", type="primary"):
-            connection = get_connection()
-            account = connection.execute(
-                "SELECT * FROM users WHERE username=?",
-                (login_username.strip(),)
-            ).fetchone()
-            connection.close()
+    if st.button("Login", type="primary"):
+        connection = get_connection()
+        user = connection.execute(
+            "SELECT * FROM users WHERE username=?",
+            (username.strip(),)
+        ).fetchone()
+        connection.close()
 
-            if account and verify_password(login_password, account["password"]):
-                # Upgrade older plain-text / SHA-256 passwords after a successful login.
-                if not account["password"].startswith("pbkdf2_sha256$"):
-                    upgrade_connection = get_connection()
-                    upgrade_connection.execute(
-                        "UPDATE users SET password=? WHERE username=?",
-                        (hash_password(login_password), account["username"])
-                    )
-                    upgrade_connection.commit()
-                    upgrade_connection.close()
-                st.session_state.logged_in = True
-                st.session_state.username = account["username"]
-                st.session_state.user_role = normalize_role(account["role"])
-                st.success("Login successful!")
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
+        if user and user["password"] == hash_password(password):
+            st.session_state.logged_in = True
+            st.session_state.username = user["username"]
+            st.session_state.user_role = user["role"]
+            st.session_state.user_hospital = user["hospital"]
+            st.success("Login successful. Open the sidebar to select your dashboard.")
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
 
     st.divider()
     st.subheader("Forgot Password?")
 
-    reset_email = st.text_input("Enter your registered email", key="forgot_email")
+    reset_email = st.text_input("Registered email address", key="reset_email")
     if st.button("Generate Reset OTP"):
         connection = get_connection()
         account = connection.execute(
@@ -658,25 +541,17 @@ elif page == "Admin Login":
         if account:
             st.session_state.reset_user = account["username"]
             st.session_state.otp = str(random.randint(100000, 999999))
-            st.session_state.otp_expiry = datetime.now() + timedelta(minutes=5)
-            st.warning(
-                "DEMO OTP (not emailed): " + st.session_state.otp
-                + ". Configure a real email/SMS provider before public use."
-            )
+            st.warning("DEMO OTP (not emailed or texted): " + st.session_state.otp)
         else:
-            st.error("Email address not registered.")
+            st.error("Email address not found.")
 
     if st.session_state.otp:
-        entered_otp = st.text_input("Enter OTP")
-        new_password = st.text_input("Create New Password", type="password")
-        confirm_password = st.text_input("Confirm New Password", type="password")
+        entered_otp = st.text_input("Enter OTP", key="reset_otp")
+        new_password = st.text_input("New Password", type="password", key="new_password")
+        confirm_password = st.text_input("Confirm New Password", type="password", key="confirm_password")
 
         if st.button("Reset Password"):
-            if datetime.now() > st.session_state.otp_expiry:
-                st.error("OTP expired. Generate a new OTP.")
-                st.session_state.otp = None
-                st.session_state.reset_user = None
-            elif entered_otp != st.session_state.otp:
+            if entered_otp != st.session_state.otp:
                 st.error("Incorrect OTP.")
             elif len(new_password) < 8:
                 st.error("Password must contain at least 8 characters.")
@@ -692,583 +567,398 @@ elif page == "Admin Login":
                 connection.close()
                 st.session_state.otp = None
                 st.session_state.reset_user = None
-                st.session_state.otp_expiry = None
-                st.success("Password changed successfully!")
+                st.success("Password changed successfully.")
 
 
-# ---------------------------------------------------------
-# HOSPITAL REGISTRATION - DISTRICT ADMIN ONLY
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# COMMON DASHBOARD
+# ------------------------------------------------------------
 
-elif page == "Hospital Registration":
-    if not st.session_state.logged_in or st.session_state.user_role != "District Commissioner":
-        st.error("Only the District Commissioner can register hospitals.")
-    else:
-        st.header("🏥 Register New Hospital")
+def show_dashboard(title, hospital_scope=None, allow_hospital_filter=False):
+    """Show metrics, donut charts, complaint list, and staff interactions."""
+    st.header("📊 " + title)
 
-        with st.form("hospital_registration_form"):
-            hospital_name = st.text_input("Hospital Name")
-            district = st.text_input("District")
-            location = st.text_input("Hospital Location")
-            st.subheader("Create Hospital Admin Account")
-            admin_username = st.text_input("Admin Username")
-            admin_email = st.text_input("Admin Email")
-            admin_password = st.text_input("Admin Password", type="password")
-            confirm_password = st.text_input("Confirm Password", type="password")
-            submitted = st.form_submit_button("Register Hospital")
-
-        if submitted:
-            if not all([
-                hospital_name.strip(), district.strip(), location.strip(),
-                admin_username.strip(), admin_email.strip(),
-                admin_password, confirm_password
-            ]):
-                st.warning("Please fill all fields.")
-            elif len(admin_password) < 8:
-                st.error("Password must contain at least 8 characters.")
-            elif admin_password != confirm_password:
-                st.error("Passwords do not match.")
-            else:
-                connection = get_connection()
-                hospital_exists = connection.execute(
-                    "SELECT 1 FROM hospitals WHERE name=?",
-                    (hospital_name.strip(),)
-                ).fetchone()
-                user_exists = connection.execute(
-                    "SELECT 1 FROM users WHERE username=?",
-                    (admin_username.strip(),)
-                ).fetchone()
-
-                if hospital_exists:
-                    st.error("Hospital already registered.")
-                elif user_exists:
-                    st.error("Username already exists.")
-                else:
-                    connection.execute(
-                        "INSERT INTO hospitals(name, district, location) VALUES (?, ?, ?)",
-                        (hospital_name.strip(), district.strip(), location.strip())
-                    )
-                    connection.execute(
-                        "INSERT INTO users(username, role, hospital, email, password) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (
-                            admin_username.strip(),
-                            "Hospital Admin",
-                            hospital_name.strip(),
-                            admin_email.strip(),
-                            hash_password(admin_password)
-                        )
-                    )
-                    connection.commit()
-                    st.success("Hospital registered successfully.")
-                    st.info("Hospital Admin Username: " + admin_username.strip())
-                connection.close()
-
-
-# ---------------------------------------------------------
-# DOCTOR AND MEDICAL SERVICE MANAGEMENT
-# ---------------------------------------------------------
-
-elif page == "Doctor & Service Management":
-    if not st.session_state.logged_in:
-        st.error("Please log in first.")
-    elif st.session_state.user_role not in ["District Commissioner", "Hospital Admin"]:
-        st.error("You do not have permission to manage doctors and services.")
-    else:
-        current_role = st.session_state.user_role
-        current_username = st.session_state.username
-
-        connection = get_connection()
-        user_account = connection.execute(
-            "SELECT hospital FROM users WHERE username=?",
-            (current_username,)
-        ).fetchone()
-        own_hospital = user_account["hospital"] if user_account else None
-
-        st.header("🩺 Doctor & Medical Service Management")
-
-        # Only the District Commissioner can create or deactivate global categories.
-        if current_role == "District Commissioner":
-            with st.expander("Manage Medical Categories", expanded=True):
-                new_category = st.text_input("New medical category", key="new_med_category")
-                if st.button("Add Category"):
-                    cleaned = new_category.strip()
-                    if not cleaned:
-                        st.warning("Enter a category name.")
-                    else:
-                        try:
-                            connection.execute(
-                                "INSERT INTO medical_categories(name, active) VALUES (?, 1)",
-                                (cleaned,)
-                            )
-                            connection.commit()
-                            st.success("Category added.")
-                            st.rerun()
-                        except sqlite3.IntegrityError:
-                            st.warning("This category already exists.")
-
-                category_rows = connection.execute(
-                    "SELECT id, name, active FROM medical_categories ORDER BY name"
-                ).fetchall()
-                for category_row in category_rows:
-                    col_a, col_b = st.columns([4, 1])
-                    col_a.write(category_row["name"])
-                    button_text = "Deactivate" if category_row["active"] else "Activate"
-                    if col_b.button(button_text, key=f"category_toggle_{category_row['id']}"):
-                        connection.execute(
-                            "UPDATE medical_categories SET active=? WHERE id=?",
-                            (0 if category_row["active"] else 1, category_row["id"])
-                        )
-                        connection.commit()
-                        st.rerun()
-
-        active_categories = get_medical_categories()
-        hospital_names = get_hospitals()
-
-        if current_role == "District Commissioner":
-            hospital_for_form = st.selectbox(
-                "Select hospital for this doctor/service",
-                hospital_names
-            ) if hospital_names else None
-        else:
-            hospital_for_form = own_hospital
-            st.text_input("Your hospital", value=own_hospital or "", disabled=True)
-
-        if not active_categories:
-            st.warning("No active medical categories are available.")
-        elif not hospital_for_form:
-            st.warning("Register a hospital before adding doctors or services.")
-        else:
-            st.subheader("Add Doctor or Medical Service")
-            with st.form("add_doctor_service_form"):
-                record_type = st.selectbox("Record type", ["Doctor", "Medical Service"])
-                person_or_service = st.text_input(
-                    "Doctor name or service title",
-                    placeholder="e.g. Dr. Anil Kumar or X-ray Department"
-                )
-                medical_category = st.selectbox("Medical category", active_categories)
-                service_description = st.text_input(
-                    "Service name / details (optional)",
-                    placeholder="e.g. Dental consultation, X-ray chest"
-                )
-                availability = st.selectbox(
-                    "Availability", ["Available", "Unavailable", "On Leave"]
-                )
-                consultation_days = st.text_input(
-                    "Consultation days", placeholder="e.g. Monday to Saturday"
-                )
-                time_col1, time_col2 = st.columns(2)
-                start_time = time_col1.text_input("Start time", placeholder="09:00 AM")
-                end_time = time_col2.text_input("End time", placeholder="01:00 PM")
-                next_available = st.date_input(
-                    "Next available date",
-                    value=date.today(),
-                    min_value=date.today()
-                )
-                save_record = st.form_submit_button("Save Doctor / Service")
-
-            if save_record:
-                if not person_or_service.strip():
-                    st.error("Enter a doctor name or service title.")
-                else:
-                    connection.execute("""
-                        INSERT INTO doctor_services (
-                            name, hospital, category, record_type, service_name,
-                            availability, consultation_days, start_time, end_time,
-                            next_available
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        person_or_service.strip(),
-                        hospital_for_form,
-                        medical_category,
-                        record_type,
-                        service_description.strip(),
-                        availability,
-                        consultation_days.strip(),
-                        start_time.strip(),
-                        end_time.strip(),
-                        next_available.isoformat(),
-                    ))
-                    connection.commit()
-                    st.success("Doctor / service saved successfully.")
-                    st.rerun()
-
-        st.divider()
-        st.subheader("Update Existing Doctors and Services")
-
-        if current_role == "District Commissioner":
-            filter_hospitals = ["All Hospitals"] + hospital_names
-            chosen_hospital = st.selectbox("Filter records by hospital", filter_hospitals)
-            if chosen_hospital == "All Hospitals":
-                records = connection.execute(
-                    "SELECT * FROM doctor_services ORDER BY hospital, category, name"
-                ).fetchall()
-            else:
-                records = connection.execute(
-                    "SELECT * FROM doctor_services WHERE hospital=? ORDER BY category, name",
-                    (chosen_hospital,)
-                ).fetchall()
-        else:
-            records = connection.execute(
-                "SELECT * FROM doctor_services WHERE hospital=? ORDER BY category, name",
-                (own_hospital,)
-            ).fetchall()
-
-        if not records:
-            st.info("No doctors or services have been added yet.")
-
-        for record in records:
-            with st.expander(
-                f"{record['name']} | {record['category']} | {record['hospital']}"
-            ):
-                st.write(f"Type: {record['record_type']}")
-                st.write(f"Details: {record['service_name'] or 'Not specified'}")
-                status_options = ["Available", "Unavailable", "On Leave"]
-                current_status = record["availability"]
-                status_index = status_options.index(current_status) if current_status in status_options else 0
-                updated_status = st.selectbox(
-                    "Availability status",
-                    status_options,
-                    index=status_index,
-                    key=f"availability_{record['id']}"
-                )
-                updated_days = st.text_input(
-                    "Consultation days",
-                    value=record["consultation_days"] or "",
-                    key=f"days_{record['id']}"
-                )
-                c_start, c_end = st.columns(2)
-                updated_start = c_start.text_input(
-                    "Start time", value=record["start_time"] or "",
-                    key=f"start_{record['id']}"
-                )
-                updated_end = c_end.text_input(
-                    "End time", value=record["end_time"] or "",
-                    key=f"end_{record['id']}"
-                )
-                updated_next = st.text_input(
-                    "Next available date (YYYY-MM-DD)",
-                    value=record["next_available"] or "",
-                    key=f"next_{record['id']}"
-                )
-
-                if st.button("Update Availability", key=f"update_{record['id']}"):
-                    # Hospital Admin is restricted to records belonging to own hospital.
-                    connection.execute("""
-                        UPDATE doctor_services
-                        SET availability=?, consultation_days=?, start_time=?,
-                            end_time=?, next_available=?, updated_at=CURRENT_TIMESTAMP
-                        WHERE id=? AND hospital=?
-                    """, (
-                        updated_status, updated_days, updated_start, updated_end,
-                        updated_next, record["id"], own_hospital if current_role == "Hospital Admin"
-                        else record["hospital"]
-                    ))
-                    connection.commit()
-                    st.success("Availability updated.")
-                    st.rerun()
-
-                if st.button("Delete Record", key=f"delete_{record['id']}"):
-                    if current_role == "District Commissioner":
-                        connection.execute(
-                            "DELETE FROM doctor_services WHERE id=?",
-                            (record["id"],)
-                        )
-                    else:
-                        connection.execute(
-                            "DELETE FROM doctor_services WHERE id=? AND hospital=?",
-                            (record["id"], own_hospital)
-                        )
-                    connection.commit()
-                    st.success("Record deleted.")
-                    st.rerun()
-
-        connection.close()
-
-
-# ---------------------------------------------------------
-# DASHBOARD FUNCTION
-# ---------------------------------------------------------
-
-def show_dashboard(dashboard_role, hospital_name=None):
-    """Display complaint counts, records and status controls."""
     connection = get_connection()
 
-    if hospital_name:
-        records = connection.execute(
-            "SELECT * FROM complaints WHERE hospital=? ORDER BY date DESC",
-            (hospital_name,)
-        ).fetchall()
+    if hospital_scope:
+        hospital_filter = hospital_scope
+        st.info("Showing data only for: " + hospital_scope)
+    elif allow_hospital_filter:
+        available = ["All Hospitals"] + fetch_hospitals()
+        hospital_filter = st.selectbox("Filter by Hospital", available)
     else:
-        records = connection.execute(
-            "SELECT * FROM complaints ORDER BY date DESC"
-        ).fetchall()
+        hospital_filter = "All Hospitals"
+
+    if allow_hospital_filter:
+        category_filter = st.selectbox("Filter by Category", ["All Categories"] + CATEGORIES)
+    else:
+        category_filter = "All Categories"
+
+    query = "SELECT * FROM complaints WHERE 1=1"
+    params = []
+
+    if hospital_filter != "All Hospitals":
+        query += " AND hospital=?"
+        params.append(hospital_filter)
+
+    if category_filter != "All Categories":
+        query += " AND category=?"
+        params.append(category_filter)
+
+    query += " ORDER BY date DESC"
+    records = connection.execute(query, params).fetchall()
 
     total = len(records)
     pending = sum(1 for row in records if row["status"] == "Pending")
     in_progress = sum(1 for row in records if row["status"] == "In Progress")
     resolved = sum(1 for row in records if row["status"] == "Resolved")
 
-    st.header(f"📊 {dashboard_role} Dashboard")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Complaints", total)
-    c2.metric("Pending", pending)
-    c3.metric("In Progress", in_progress)
-    c4.metric("Resolved", resolved)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Complaints", total)
+    col2.metric("Pending", pending)
+    col3.metric("In Progress", in_progress)
+    col4.metric("Resolved", resolved)
 
-    # Circular charts use the patient's selected complaint category and status.
     st.divider()
-    st.subheader("Complaint Statistics")
-    chart_col1, chart_col2 = st.columns(2)
+    st.subheader("Complaint Analysis - Donut Charts")
 
-    category_counts = {}
-    status_counts = {}
-    for item in records:
-        category_name = item["category"] or "Not specified"
-        status_name = item["status"] or "Not specified"
-        category_counts[category_name] = category_counts.get(category_name, 0) + 1
-        status_counts[status_name] = status_counts.get(status_name, 0) + 1
+    if records:
+        chart_data = [dict(row) for row in records]
+        left, middle, right = st.columns(3)
 
-    with chart_col1:
-        st.caption("Complaints by patient-selected category")
-        if category_counts:
-            category_fig = px.pie(
+        with left:
+            category_counts = {}
+            for row in chart_data:
+                category_counts[row["category"]] = category_counts.get(row["category"], 0) + 1
+            fig_category = px.pie(
                 names=list(category_counts.keys()),
                 values=list(category_counts.values()),
-                hole=0.48
+                hole=0.55,
+                title="Problems by Category"
             )
-            category_fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(category_fig, use_container_width=True)
-        else:
-            st.info("No category data to display yet.")
+            st.plotly_chart(fig_category, use_container_width=True)
 
-    with chart_col2:
-        st.caption("Complaints by status")
-        if status_counts:
-            status_fig = px.pie(
+        with middle:
+            status_counts = {}
+            for status in STATUSES:
+                status_counts[status] = sum(1 for row in chart_data if row["status"] == status)
+            fig_status = px.pie(
                 names=list(status_counts.keys()),
                 values=list(status_counts.values()),
-                hole=0.48
+                hole=0.55,
+                title="Complaints by Status"
             )
-            status_fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(status_fig, use_container_width=True)
-        else:
-            st.info("No status data to display yet.")
+            st.plotly_chart(fig_status, use_container_width=True)
 
-    if not hospital_name:
-        hospital_counts = {}
-        for item in records:
-            hospital_label = item["hospital"] or "Not specified"
-            hospital_counts[hospital_label] = hospital_counts.get(hospital_label, 0) + 1
-        st.caption("Complaints by hospital")
-        if hospital_counts:
-            hospital_fig = px.pie(
+        with right:
+            hospital_counts = {}
+            for row in chart_data:
+                hospital_counts[row["hospital"]] = hospital_counts.get(row["hospital"], 0) + 1
+            fig_hospital = px.pie(
                 names=list(hospital_counts.keys()),
                 values=list(hospital_counts.values()),
-                hole=0.48
+                hole=0.55,
+                title="Complaints by Hospital"
             )
-            hospital_fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(hospital_fig, use_container_width=True)
+            st.plotly_chart(fig_hospital, use_container_width=True)
+    else:
+        st.info("No complaints match the selected filters. Charts will appear when complaints are registered.")
 
     st.divider()
     st.subheader("Complaint Records")
 
     if not records:
-        st.info("No complaints have been registered yet.")
+        st.info("No complaints found.")
+        connection.close()
+        return
 
     for record in records:
         with st.expander(
-            f"{record['id']} | {record['hospital']} | {record['status']}"
+            f"{record['id']} | {record['hospital']} | {record['category']} | {record['status']}"
         ):
             st.write("Patient:", record["name"])
             st.write("Phone:", record["phone"])
             st.write("Hospital:", record["hospital"])
-            st.write("Patient category:", record["category"])
+            st.write("Category:", record["category"])
+            st.write("AI category suggestion:", record["ai_category"] or "Not available")
             st.write("Complaint:", record["complaint"])
             st.write("Status:", record["status"])
             st.write("Date:", record["date"])
 
-            if record["ai_category"]:
-                st.markdown("**AI review suggestion**")
-                st.write("Suggested category:", record["ai_category"])
-                st.write("Summary:", record["ai_summary"] or "Not available")
-                st.write("Priority:", record["ai_priority"] or "Not set")
-                if record["ai_urgent"]:
-                    st.error("AI flagged this complaint as potentially urgent.")
-                else:
-                    st.write("Urgent flag: No")
-                st.write("Reason:", record["ai_reason"] or "Not provided")
-                st.warning(
-                    "AI output is only a suggestion. A human staff member must review it."
-                )
-            else:
-                st.info("No AI analysis is stored for this complaint.")
+            # Show the full conversation/update history for this complaint.
+            history = connection.execute("""
+                SELECT author, author_role, message, created_at
+                FROM complaint_interactions
+                WHERE complaint_id=?
+                ORDER BY interaction_id
+            """, (record["id"],)).fetchall()
 
-    if records:
-        st.divider()
-        st.subheader("Update Complaint Status")
-        selected_id = st.selectbox(
-            "Select Complaint ID",
-            [record["id"] for record in records]
+            st.markdown("**Interaction History**")
+            if history:
+                for item in history:
+                    st.write(f"{item['created_at']} - {item['author']} ({item['author_role']}): {item['message']}")
+            else:
+                st.caption("No interaction history.")
+
+    st.divider()
+    st.subheader("Update Complaint and Reply to Patient")
+
+    selected_id = st.selectbox(
+        "Select Complaint ID",
+        [record["id"] for record in records],
+        key=f"selected_complaint_{title.replace(' ', '_')}"
+    )
+
+    selected_record = next(record for record in records if record["id"] == selected_id)
+
+    new_status = st.selectbox(
+        "Complaint Status",
+        STATUSES,
+        index=STATUSES.index(selected_record["status"]) if selected_record["status"] in STATUSES else 0,
+        key=f"status_{title.replace(' ', '_')}"
+    )
+    reply = st.text_area(
+        "Write a reply or progress update for the patient",
+        key=f"reply_{title.replace(' ', '_')}"
+    )
+
+    if st.button("Save Status and Reply", type="primary", key=f"save_{title.replace(' ', '_')}"):
+        connection.execute(
+            "UPDATE complaints SET status=? WHERE id=?",
+            (new_status, selected_id)
         )
-        new_status = st.selectbox(
-            "New Status", ["Pending", "In Progress", "Resolved"]
-        )
-        if st.button("Update Complaint Status"):
-            connection.execute(
-                "UPDATE complaints SET status=? WHERE id=?",
-                (new_status, selected_id)
-            )
+        connection.commit()
+
+        if reply.strip():
+            connection.execute("""
+                INSERT INTO complaint_interactions
+                (complaint_id, author, author_role, message, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                selected_id,
+                st.session_state.username,
+                st.session_state.user_role,
+                reply.strip(),
+                datetime.now().strftime("%d-%m-%Y %H:%M")
+            ))
             connection.commit()
-            st.success("Complaint status updated.")
-            st.rerun()
+
+        connection.close()
+        st.success("Complaint status and reply saved.")
+        st.rerun()
 
     connection.close()
 
 
-# ---------------------------------------------------------
-# USER ACCOUNT MANAGEMENT
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# HOSPITAL MANAGEMENT - MAIN ADMIN ONLY
+# ------------------------------------------------------------
 
-if page == "Manage Users":
-    if not st.session_state.logged_in:
-        st.error("Please log in first.")
-    elif st.session_state.user_role not in ["District Commissioner", "Hospital Admin"]:
-        st.error("You do not have permission to manage accounts.")
-    else:
-        current_role = st.session_state.user_role
-        current_username = st.session_state.username
-        connection = get_connection()
-        current_account = connection.execute(
-            "SELECT hospital FROM users WHERE username=?", (current_username,)
-        ).fetchone()
-        own_hospital = current_account["hospital"] if current_account else None
+if page == "Hospital Management":
+    if st.session_state.logged_in and st.session_state.user_role == "Main Admin":
+        st.header("🏥 Hospital Management")
+        with st.form("add_hospital_form"):
+            new_hospital = st.text_input("Hospital Name")
+            new_district = st.text_input("District")
+            new_location = st.text_input("Hospital Location")
+            add_hospital = st.form_submit_button("Register Hospital")
 
-        st.header("👥 Manage User Accounts")
-        st.caption("District Commissioner can manage all accounts. Hospital Admin can manage accounts linked to their own hospital.")
-
-        with st.form("create_user_account_form"):
-            new_username = st.text_input("New username")
-            new_email = st.text_input("Email address")
-            new_password = st.text_input("Temporary password", type="password")
-            confirm_new_password = st.text_input("Confirm password", type="password")
-            if current_role == "District Commissioner":
-                account_role = "Hospital Admin"
-                st.text_input("Account role", value=account_role, disabled=True)
-                account_hospital = st.selectbox("Hospital", get_hospitals()) if get_hospitals() else ""
+        if add_hospital:
+            if not new_hospital.strip() or not new_district.strip() or not new_location.strip():
+                st.error("Please fill all hospital fields.")
             else:
-                account_role = "Hospital Admin"
-                account_hospital = own_hospital or ""
-                st.text_input("Hospital", value=account_hospital, disabled=True)
-            create_account = st.form_submit_button("Create Account")
-
-        if create_account:
-            if not all([new_username.strip(), new_email.strip(), new_password, confirm_new_password, account_hospital]):
-                st.warning("Complete all account fields.")
-            elif len(new_password) < 8:
-                st.error("Password must contain at least 8 characters.")
-            elif new_password != confirm_new_password:
-                st.error("Passwords do not match.")
-            else:
-                exists = connection.execute(
-                    "SELECT 1 FROM users WHERE username=?", (new_username.strip(),)
-                ).fetchone()
-                if exists:
-                    st.error("That username already exists.")
-                else:
-                    connection.execute(
-                        "INSERT INTO users(username, role, hospital, email, password) VALUES (?, ?, ?, ?, ?)",
-                        (new_username.strip(), account_role, account_hospital, new_email.strip(), hash_password(new_password))
-                    )
+                connection = get_connection()
+                try:
+                    connection.execute("""
+                        INSERT INTO hospitals (name, district, location)
+                        VALUES (?, ?, ?)
+                    """, (new_hospital.strip(), new_district.strip(), new_location.strip()))
                     connection.commit()
-                    st.success("Account created successfully.")
+                    st.success("Hospital registered.")
                     st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("This hospital name already exists.")
+                finally:
+                    connection.close()
+
+        st.subheader("Registered Hospitals")
+        connection = get_connection()
+        hospital_rows = connection.execute(
+            "SELECT * FROM hospitals ORDER BY name"
+        ).fetchall()
+        connection.close()
+
+        for hospital in hospital_rows:
+            st.write(f"**{hospital['name']}** — {hospital['district']} — {hospital['location']}")
+    else:
+        st.error("Access denied. Main Admin only.")
+
+
+# ------------------------------------------------------------
+# USER MANAGEMENT
+# ------------------------------------------------------------
+
+elif page == "User Management":
+    if st.session_state.logged_in and st.session_state.user_role == "Main Admin":
+        st.header("👥 User Management - Main Admin")
+        st.write("Main Admin can create Hospital Admin and Hospital Staff accounts.")
+
+        with st.form("main_admin_create_user"):
+            new_username = st.text_input("New Username")
+            new_email = st.text_input("Email")
+            new_role = st.selectbox("Account Role", ["Hospital Admin", "Hospital Staff"])
+            new_user_hospital = st.selectbox("Hospital", fetch_hospitals())
+            new_user_password = st.text_input("Temporary Password", type="password")
+            create_user = st.form_submit_button("Create Account")
+
+        if create_user:
+            if not all([new_username.strip(), new_email.strip(), new_user_password]):
+                st.error("Fill all fields.")
+            elif len(new_user_password) < 8:
+                st.error("Password must contain at least 8 characters.")
+            else:
+                connection = get_connection()
+                try:
+                    connection.execute("""
+                        INSERT INTO users (username, role, hospital, email, password)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        new_username.strip(),
+                        new_role,
+                        new_user_hospital,
+                        new_email.strip(),
+                        hash_password(new_user_password)
+                    ))
+                    connection.commit()
+                    st.success("User account created.")
+                except sqlite3.IntegrityError:
+                    st.error("That username already exists.")
+                finally:
+                    connection.close()
 
         st.divider()
         st.subheader("Existing Accounts")
-        if current_role == "District Commissioner":
-            user_rows = connection.execute(
-                "SELECT username, role, hospital, email FROM users ORDER BY role, username"
-            ).fetchall()
-        else:
-            user_rows = connection.execute(
-                "SELECT username, role, hospital, email FROM users WHERE hospital=? AND username<>? ORDER BY username",
-                (own_hospital, current_username)
-            ).fetchall()
-
-        for user_row in user_rows:
-            with st.expander(f"{user_row['username']} — {user_row['role']}"):
-                st.write("Hospital:", user_row["hospital"] or "Not assigned")
-                st.write("Email:", user_row["email"] or "Not provided")
-                with st.form(f"reset_user_{user_row['username']}"):
-                    reset_password = st.text_input("Set new password", type="password", key=f"pw_{user_row['username']}")
-                    reset_confirm = st.text_input("Confirm new password", type="password", key=f"pc_{user_row['username']}")
-                    reset_clicked = st.form_submit_button("Reset Password")
-                if reset_clicked:
-                    if len(reset_password) < 8:
-                        st.error("Password must contain at least 8 characters.")
-                    elif reset_password != reset_confirm:
-                        st.error("Passwords do not match.")
-                    else:
-                        connection.execute(
-                            "UPDATE users SET password=? WHERE username=?",
-                            (hash_password(reset_password), user_row["username"])
-                        )
-                        connection.commit()
-                        st.success("Password updated.")
-                        st.rerun()
-                protected_usernames = {"district", current_username}
-                if user_row["username"] not in protected_usernames:
-                    if st.button("Delete Account", key=f"delete_user_{user_row['username']}"):
-                        if current_role == "Hospital Admin":
-                            connection.execute(
-                                "DELETE FROM users WHERE username=? AND hospital=?",
-                                (user_row["username"], own_hospital)
-                            )
-                        else:
-                            connection.execute(
-                                "DELETE FROM users WHERE username=?",
-                                (user_row["username"],)
-                            )
-                        connection.commit()
-                        st.success("Account deleted.")
-                        st.rerun()
-        connection.close()
-
-
-# ---------------------------------------------------------
-# DISTRICT AND HOSPITAL DASHBOARDS
-# ---------------------------------------------------------
-
-if page == "District Dashboard":
-    if st.session_state.logged_in and st.session_state.user_role == "District Commissioner":
-        show_dashboard("District Commissioner")
-    else:
-        st.error("Access denied. Please log in as District Commissioner.")
-
-if page == "Hospital Dashboard":
-    if st.session_state.logged_in and st.session_state.user_role == "Hospital Admin":
         connection = get_connection()
-        account = connection.execute(
-            "SELECT hospital FROM users WHERE username=?",
-            (st.session_state.username,)
-        ).fetchone()
+        accounts = connection.execute(
+            "SELECT username, role, hospital, email FROM users ORDER BY role, username"
+        ).fetchall()
         connection.close()
 
-        if account and account["hospital"]:
-            show_dashboard("Hospital Admin", account["hospital"])
-        else:
-            st.error("Your admin account is not linked to a hospital.")
+        for account in accounts:
+            st.write(
+                f"**{account['username']}** | {account['role']} | "
+                f"{account['hospital']} | {account['email']}"
+            )
+
+        deletable_accounts = [a["username"] for a in accounts if a["role"] != "Main Admin"]
+        if deletable_accounts:
+            delete_username = st.selectbox("Select account to delete", deletable_accounts)
+            if st.button("Delete Selected Account"):
+                connection = get_connection()
+                connection.execute("DELETE FROM users WHERE username=?", (delete_username,))
+                connection.commit()
+                connection.close()
+                st.success("Account deleted.")
+                st.rerun()
     else:
-        st.error("Access denied. Please log in as Hospital Admin.")
+        st.error("Access denied. Main Admin only.")
 
 
-# ---------------------------------------------------------
-# FOOTER
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# DASHBOARD ROUTING
+# ------------------------------------------------------------
 
-st.divider()
-st.caption(
-    "SMARTCARE AI | AI suggestions are not medical advice. "
-    "Hospital staff must verify complaint priorities and service availability."
-)
+elif page == "Main Admin Dashboard":
+    if st.session_state.logged_in and st.session_state.user_role == "Main Admin":
+        show_dashboard("Main Admin Dashboard", allow_hospital_filter=True)
+    else:
+        st.error("Access denied. Main Admin only.")
+
+elif page == "Hospital Dashboard":
+    if st.session_state.logged_in and st.session_state.user_role == "Hospital Admin":
+        show_dashboard(
+            "Hospital Dashboard",
+            hospital_scope=st.session_state.user_hospital
+        )
+    else:
+        st.error("Access denied. Hospital Admin only.")
+
+elif page == "Staff Dashboard":
+    if st.session_state.logged_in and st.session_state.user_role == "Hospital Staff":
+        show_dashboard(
+            "Staff Dashboard",
+            hospital_scope=st.session_state.user_hospital
+        )
+    else:
+        st.error("Access denied.")
+
+elif page == "Staff Management":
+    if st.session_state.logged_in and st.session_state.user_role == "Hospital Admin":
+        st.header("👥 Staff Management")
+        st.write("You can create and manage staff accounts for your hospital only.")
+
+        with st.form("hospital_staff_create"):
+            staff_username = st.text_input("Staff Username")
+            staff_email = st.text_input("Staff Email")
+            staff_password = st.text_input("Temporary Password", type="password")
+            create_staff = st.form_submit_button("Create Staff Account")
+
+        if create_staff:
+            if not staff_username.strip() or not staff_email.strip() or not staff_password:
+                st.error("Please fill all fields.")
+            elif len(staff_password) < 8:
+                st.error("Password must contain at least 8 characters.")
+            else:
+                connection = get_connection()
+                try:
+                    connection.execute("""
+                        INSERT INTO users (username, role, hospital, email, password)
+                        VALUES (?, 'Hospital Staff', ?, ?, ?)
+                    """, (
+                        staff_username.strip(),
+                        st.session_state.user_hospital,
+                        staff_email.strip(),
+                        hash_password(staff_password)
+                    ))
+                    connection.commit()
+                    st.success("Staff account created.")
+                except sqlite3.IntegrityError:
+                    st.error("That username already exists.")
+                finally:
+                    connection.close()
+
+        connection = get_connection()
+        staff_accounts = connection.execute("""
+            SELECT username, email FROM users
+            WHERE hospital=? AND role='Hospital Staff'
+            ORDER BY username
+        """, (st.session_state.user_hospital,)).fetchall()
+        connection.close()
+
+        st.subheader("Your Hospital Staff")
+        if staff_accounts:
+            for staff in staff_accounts:
+                st.write(f"**{staff['username']}** — {staff['email']}")
+            staff_to_delete = st.selectbox(
+                "Select staff account to remove",
+                [staff["username"] for staff in staff_accounts]
+            )
+            if st.button("Remove Selected Staff"):
+                connection = get_connection()
+                connection.execute("""
+                    DELETE FROM users
+                    WHERE username=? AND hospital=? AND role='Hospital Staff'
+                """, (staff_to_delete, st.session_state.user_hospital))
+                connection.commit()
+                connection.close()
+                st.success("Staff account removed.")
+                st.rerun()
+        else:
+            st.info("No staff accounts have been created yet.")
+    else:
+        st.error("Access denied. Hospital Admin only.")
+
+
+# ------------------------------------------------------------
+# END OF APP
+# ------------------------------------------------------------
