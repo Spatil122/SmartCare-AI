@@ -11,9 +11,11 @@ Beginner note:
 
 import os
 import json
+from pathlib import Path
 import uuid
 import random
 import hashlib
+import hmac
 import sqlite3
 import urllib.request
 import urllib.error
@@ -33,7 +35,7 @@ st.set_page_config(
     layout="wide"
 )
 
-DB_PATH = "smartcare.db"
+DB_PATH = str(Path(__file__).resolve().parent / "smartcare.db")
 
 DEFAULT_MEDICAL_CATEGORIES = [
     "Dental",
@@ -91,6 +93,3 @@ def get_connection():
     connection.row_factory = sqlite3.Row
     return connection
 
-
-def column_exists(connection, table_name, column_name):
-    """Check whether a database column already exists."""
